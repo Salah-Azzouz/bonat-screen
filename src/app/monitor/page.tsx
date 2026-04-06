@@ -1,13 +1,10 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState, useRef } from 'react';
 import { useAuthStore } from '@/stores/auth-store';
-import { getAllBranches } from '@/lib/api/branches';
 import { useRouter } from 'next/navigation';
 import { ensureAuth, getDb } from '@/lib/firebase';
 import { ref, onValue } from 'firebase/database';
-import { createOrder } from '@/lib/api/orders';
 import { generateDeepLink, generateOrderId, generateQRCodeDataURL } from '@/lib/qrcode';
 import { Spinner } from '@/components/ui/LoadingSpinner';
 import { playNotificationSound } from '@/lib/sound';
@@ -17,130 +14,143 @@ import type { Order } from '@/types/order';
 interface BranchMonitor {
   branch: Branch;
   orderId: string;
-  deepLink: string;
   qrDataUrl: string;
-  order: Order | null;
+  lastOrder: Order | null;
+  orderCount: number;
   listening: boolean;
   error: string | null;
 }
 
 export default function MonitorPage() {
   const router = useRouter();
-  const { merchant, isAuthenticated } = useAuthStore();
+  const { merchant, token, isAuthenticated } = useAuthStore();
   const [monitors, setMonitors] = useState<BranchMonitor[]>([]);
-  const [ready, setReady] = useState(false);
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [errorMsg, setErrorMsg] = useState('');
   const unsubsRef = useRef<(() => void)[]>([]);
 
-  const { data: branches, isLoading, error } = useQuery({
-    queryKey: ['branches'],
-    queryFn: getAllBranches,
-    retry: 2,
-  });
-
-  // If not authenticated, redirect to login
-  useEffect(() => {
-    if (!isAuthenticated) {
-      router.replace('/login');
-    }
-  }, [isAuthenticated, router]);
-
   const liveCount = monitors.filter((m) => m.listening).length;
-  const alertCount = monitors.filter((m) => m.order && (m.order.idCustomer || m.order.phoneNumber || m.order.idCoupon)).length;
+  const alertCount = monitors.filter((m) => m.lastOrder && (m.lastOrder.idCustomer || m.lastOrder.phoneNumber || m.lastOrder.idCoupon)).length;
 
-  // Regenerate QR for a specific branch
-  const regenerate = useCallback(async (branchId: string) => {
-    if (!merchant) return;
-    const branch = monitors.find((m) => m.branch.idBranch === branchId);
-    if (!branch) return;
-
-    const oid = generateOrderId();
-    const link = generateDeepLink(merchant.idMerchant, branchId, oid);
-    const qr = await generateQRCodeDataURL(link, 140);
-
-    // Unsubscribe old listener for this branch
-    // Create new order + subscribe
-    try { await createOrder(merchant.idMerchant, branchId, oid); } catch {}
-
-    const db = getDb();
-    const orderRef = ref(db, `Bonat/${merchant.idMerchant}/${branchId}/${oid}`);
-    const unsub = onValue(orderRef, (snapshot) => {
-      const data = snapshot.exists() ? (snapshot.val() as Order) : null;
-      setMonitors((prev) => prev.map((m) =>
-        m.branch.idBranch === branchId ? { ...m, orderId: oid, deepLink: link, qrDataUrl: qr, order: data, listening: true, error: null } : m,
-      ));
-      if (data && (data.idCustomer || data.phoneNumber || data.idCoupon)) {
-        playNotificationSound();
-      }
-    }, (error) => {
-      setMonitors((prev) => prev.map((m) =>
-        m.branch.idBranch === branchId ? { ...m, error: error.message, listening: false } : m,
-      ));
-    });
-
-    unsubsRef.current.push(unsub);
-  }, [merchant, monitors]);
-
-  // Setup all branch monitors
   useEffect(() => {
-    if (!branches || !merchant || ready) return;
+    if (!isAuthenticated || !merchant || !token) {
+      router.replace('/login');
+      return;
+    }
+
+    let cancelled = false;
 
     const setup = async () => {
-      console.log('🖥️ [Monitor] Starting setup —', branches.length, 'branches');
+      console.log('🖥️ [Monitor] Starting...');
+
+      // 1. Fetch branches directly (bypass apiGet to avoid auto-logout)
+      let branches: Branch[] = [];
+      try {
+        const res = await fetch(`/api/proxy?endpoint=/allbranch`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const json = await res.json();
+        if (json.code === 0 && Array.isArray(json.data)) {
+          branches = json.data;
+        } else {
+          throw new Error(json.errors?.[0] || 'Failed to load branches');
+        }
+      } catch (err) {
+        console.error('❌ [Monitor] Branch fetch failed:', err);
+        if (!cancelled) { setStatus('error'); setErrorMsg(err instanceof Error ? err.message : 'Failed'); }
+        return;
+      }
+
+      console.log(`📡 [Monitor] Loaded ${branches.length} branches`);
+
+      // 2. Firebase auth
       await ensureAuth();
       console.log('🔥 [Monitor] Firebase auth ready');
 
-      // 1. Build monitors with QR codes immediately
-      const entries = branches.map((branch) => {
+      if (cancelled) return;
+
+      // 3. Build monitors
+      const newMonitors: BranchMonitor[] = branches.map((branch) => {
         const oid = generateOrderId();
-        const link = generateDeepLink(merchant.idMerchant, branch.idBranch, oid);
-        return { branch, oid, link };
+        return {
+          branch, orderId: oid, qrDataUrl: '',
+          lastOrder: null, orderCount: 0, listening: false, error: null,
+        };
       });
 
-      const newMonitors: BranchMonitor[] = entries.map(({ branch, oid, link }) => ({
-        branch, orderId: oid, deepLink: link, qrDataUrl: '',
-        order: null, listening: false, error: null,
-      }));
-
       setMonitors(newMonitors);
-      setReady(true);
+      setStatus('ready');
 
-      // 2. Generate QR codes
-      for (const { oid, link } of entries) {
+      // 4. Generate QR codes async
+      for (const m of newMonitors) {
+        const link = generateDeepLink(merchant.idMerchant, m.branch.idBranch, m.orderId);
         generateQRCodeDataURL(link, 140).then((qr) => {
-          setMonitors((prev) => prev.map((m) => m.orderId === oid ? { ...m, qrDataUrl: qr } : m));
+          if (!cancelled) {
+            setMonitors((prev) => prev.map((p) =>
+              p.branch.idBranch === m.branch.idBranch ? { ...p, qrDataUrl: qr } : p,
+            ));
+          }
         });
+
+        // Create order in Firebase (fire and forget)
+        fetch('/api/proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: '/cf/createOrder', body: new URLSearchParams({ idMerchant: merchant.idMerchant, idBranch: m.branch.idBranch, idOrder: m.orderId }).toString(), headers: {} }),
+        }).catch(() => {});
       }
 
-      // 3. Create orders sequentially, then subscribe
+      // 5. Subscribe to each branch with onValue
       const db = getDb();
       const unsubs: (() => void)[] = [];
 
-      for (const { branch, oid } of entries) {
-        console.log(`📡 [Monitor] Creating order — branch: ${branch.district}`);
-        try {
-          await createOrder(merchant.idMerchant, branch.idBranch, oid);
-          console.log(`📡 [Monitor] Order created — branch: ${branch.district}, orderId: ${oid}`);
-        } catch (err) {
-          console.warn(`⚠️ [Monitor] Order creation failed — branch: ${branch.district}, subscribing anyway`);
-        }
+      for (const m of newMonitors) {
+        const branchPath = `Bonat/${merchant.idMerchant}/${m.branch.idBranch}`;
+        console.log(`🔥 [Monitor] Subscribing: ${branchPath}`);
 
-        const path = `Bonat/${merchant.idMerchant}/${branch.idBranch}/${oid}`;
-        console.log(`🔥 [Monitor] Subscribing to path: ${path}`);
-        const orderRef = ref(db, path);
-        const unsub = onValue(orderRef, (snapshot) => {
-          console.log(`🔥 [Monitor] Data received — branch: ${branch.district}, exists: ${snapshot.exists()}`);
-          const data = snapshot.exists() ? (snapshot.val() as Order) : null;
-          setMonitors((prev) => prev.map((m) =>
-            m.orderId === oid ? { ...m, order: data, listening: true, error: null } : m,
+        const branchRef = ref(db, branchPath);
+        const unsub = onValue(branchRef, (snapshot) => {
+          if (cancelled) return;
+
+          if (!snapshot.exists()) {
+            console.log(`🔥 [Monitor] ${m.branch.district}: empty`);
+            setMonitors((prev) => prev.map((p) =>
+              p.branch.idBranch === m.branch.idBranch ? { ...p, listening: true } : p,
+            ));
+            return;
+          }
+
+          const allOrders = snapshot.val() as Record<string, Order>;
+          const entries = Object.entries(allOrders);
+
+          // Find latest by timestamp
+          let latest: Order | null = null;
+          let latestKey = '';
+          for (const [key, order] of entries) {
+            if (!latest || (order.timestamp || 0) > (latest.timestamp || 0)) {
+              latest = { ...order, idOrder: key };
+              latestKey = key;
+            }
+          }
+
+          console.log(`🔥 [Monitor] ${m.branch.district}: ${entries.length} orders, latest: ${latestKey.slice(0, 8)}`);
+
+          setMonitors((prev) => prev.map((p) =>
+            p.branch.idBranch === m.branch.idBranch
+              ? { ...p, lastOrder: latest, orderCount: entries.length, listening: true, error: null }
+              : p,
           ));
-          if (data && (data.idCustomer || data.phoneNumber || data.idCoupon)) {
+
+          if (latest && (latest.idCustomer || latest.phoneNumber || latest.idCoupon)) {
             playNotificationSound();
           }
         }, (error) => {
-          console.error(`❌ [Monitor] Listener failed — branch: ${branch.district}`, error.message);
-          setMonitors((prev) => prev.map((m) =>
-            m.orderId === oid ? { ...m, error: error.message, listening: false } : m,
-          ));
+          console.error(`❌ [Monitor] ${m.branch.district}:`, error.message);
+          if (!cancelled) {
+            setMonitors((prev) => prev.map((p) =>
+              p.branch.idBranch === m.branch.idBranch ? { ...p, error: error.message, listening: false } : p,
+            ));
+          }
         });
 
         unsubs.push(unsub);
@@ -150,14 +160,18 @@ export default function MonitorPage() {
     };
 
     setup();
-    return () => { unsubsRef.current.forEach((u) => u()); };
-  }, [branches, merchant, ready]);
+
+    return () => {
+      cancelled = true;
+      unsubsRef.current.forEach((u) => u());
+    };
+  }, [merchant, token, isAuthenticated, router]);
 
   if (!merchant) return null;
 
   return (
     <div className="h-screen flex flex-col bg-brand-dark overflow-hidden">
-      {/* Compact header */}
+      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
         <div className="flex items-center gap-3">
           <img src="/images/logo.png" alt="Bonat" className="h-6" />
@@ -168,7 +182,7 @@ export default function MonitorPage() {
         </div>
         <div className="flex items-center gap-4">
           {alertCount > 0 && (
-            <span className="flex items-center gap-1.5 rounded-full bg-success/20 px-3 py-1 text-xs font-bold text-success">
+            <span className="flex items-center gap-1.5 rounded-full bg-success/20 px-3 py-1 text-xs font-bold text-success animate-pulse">
               {alertCount} alert{alertCount > 1 ? 's' : ''}
             </span>
           )}
@@ -179,16 +193,16 @@ export default function MonitorPage() {
         </div>
       </div>
 
-      {/* Grid */}
+      {/* Content */}
       <div className="flex-1 overflow-auto p-3">
-        {error ? (
+        {status === 'error' ? (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
-              <p className="text-sm text-error mb-3">Failed to load branches. Please log in again.</p>
+              <p className="text-sm text-error mb-3">{errorMsg || 'Failed to load'}</p>
               <button onClick={() => router.push('/login')} className="text-sm text-brand-orange hover:underline">Go to Login</button>
             </div>
           </div>
-        ) : isLoading || !ready ? (
+        ) : status === 'loading' ? (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
               <Spinner size={28} />
@@ -198,7 +212,7 @@ export default function MonitorPage() {
         ) : (
           <div className="grid gap-2 grid-cols-1 sm:grid-cols-2">
             {monitors.map((m) => {
-              const hasCustomer = m.order && (m.order.idCustomer || m.order.phoneNumber || m.order.idCoupon);
+              const hasCustomer = m.lastOrder && (m.lastOrder.idCustomer || m.lastOrder.phoneNumber || m.lastOrder.idCoupon);
 
               return (
                 <div
@@ -208,53 +222,44 @@ export default function MonitorPage() {
                       ? 'bg-success/20 ring-2 ring-success'
                       : m.error
                         ? 'bg-error/10 ring-1 ring-error/30'
-                        : 'bg-white/5 hover:bg-white/8'
+                        : 'bg-white/5'
                   }`}
                 >
-                  {/* Top row: name + status */}
                   <div className="flex items-start justify-between mb-2">
-                    <h3 className="text-xs font-bold text-white leading-tight truncate flex-1 mr-1">
-                      {m.branch.district}
-                    </h3>
-                    <span
-                      className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${
-                        hasCustomer ? 'bg-success' : m.listening ? 'bg-success animate-pulse' : m.error ? 'bg-error' : 'bg-white/20'
-                      }`}
-                    />
+                    <div className="flex-1 mr-2">
+                      <h3 className="text-xs font-bold text-white leading-tight truncate">{m.branch.district}</h3>
+                      <p className="text-[10px] text-white/40 mt-0.5">
+                        {m.orderCount > 0 ? `${m.orderCount} orders` : 'No orders yet'}
+                        {m.lastOrder?.status ? ` · ${m.lastOrder.status}` : ''}
+                      </p>
+                    </div>
+                    <span className={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${
+                      hasCustomer ? 'bg-success' : m.listening ? 'bg-success animate-pulse' : m.error ? 'bg-error' : 'bg-white/20'
+                    }`} />
                   </div>
 
-                  {/* QR */}
                   <div className="flex justify-center my-2">
                     {m.qrDataUrl ? (
                       <img src={m.qrDataUrl} alt="QR" className="rounded-lg" width={120} height={120} />
                     ) : (
-                      <div className="h-[120px] w-[120px] flex items-center justify-center">
-                        <Spinner size={16} />
-                      </div>
+                      <div className="h-[120px] w-[120px] flex items-center justify-center"><Spinner size={16} /></div>
                     )}
                   </div>
 
-                  {/* Status */}
                   {hasCustomer ? (
                     <div className="rounded-lg bg-success/20 px-2 py-1.5 text-center animate-fade-in">
                       <p className="text-[10px] font-bold text-success uppercase tracking-wide">Customer Scanned</p>
-                      {m.order?.phoneNumber && (
-                        <p className="text-[10px] text-white/60 mt-0.5">{m.order.phoneNumber}</p>
-                      )}
+                      {m.lastOrder?.phoneNumber && <p className="text-[10px] text-white/60 mt-0.5">{m.lastOrder.phoneNumber}</p>}
+                      {m.lastOrder?.idCustomer && <p className="text-[10px] text-white/60 mt-0.5">ID: {m.lastOrder.idCustomer}</p>}
                     </div>
                   ) : m.error ? (
-                    <button
-                      onClick={() => regenerate(m.branch.idBranch)}
-                      className="w-full rounded-lg bg-error/20 px-2 py-1.5 text-center text-[10px] text-error hover:bg-error/30 transition-colors"
-                    >
-                      Retry
-                    </button>
+                    <div className="rounded-lg bg-error/20 px-2 py-1.5 text-center">
+                      <p className="text-[10px] text-error truncate">{m.error.slice(0, 50)}</p>
+                    </div>
                   ) : (
                     <div className="flex items-center justify-center gap-1.5">
                       <span className={`h-2 w-2 rounded-full ${m.listening ? 'bg-success animate-pulse' : 'bg-white/30'}`} />
-                      <p className="text-[10px] text-white">
-                        {m.listening ? 'Waiting for scan' : 'Connecting...'}
-                      </p>
+                      <p className="text-[10px] text-white">{m.listening ? 'Live — waiting for scan' : 'Connecting...'}</p>
                     </div>
                   )}
                 </div>
