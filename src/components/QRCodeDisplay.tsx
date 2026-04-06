@@ -9,7 +9,7 @@ interface QRCodeDisplayProps {
   size?: number;
 }
 
-export function QRCodeDisplay({ data, size = 350 }: QRCodeDisplayProps) {
+export function QRCodeDisplay({ data, size = 280 }: QRCodeDisplayProps) {
   const [qrUrl, setQrUrl] = useState<string>('');
 
   useEffect(() => {
@@ -19,17 +19,21 @@ export function QRCodeDisplay({ data, size = 350 }: QRCodeDisplayProps) {
   if (!qrUrl) {
     return (
       <div
-        className="flex items-center justify-center rounded-2xl bg-surface shadow-sm"
+        className="flex items-center justify-center rounded-2xl bg-white"
         style={{ width: size, height: size }}
       >
-        <Spinner size={32} />
+        <Spinner size={24} />
       </div>
     );
   }
 
   return (
-    <div className="rounded-2xl bg-surface p-6 shadow-sm animate-fade-in">
-      <img src={qrUrl} alt="QR Code" width={size} height={size} className="rounded-lg" />
-    </div>
+    <img
+      src={qrUrl}
+      alt="QR Code"
+      width={size}
+      height={size}
+      className="rounded-xl"
+    />
   );
 }

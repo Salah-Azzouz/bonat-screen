@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/Button';
 import { BranchListItem } from '@/components/BranchListItem';
@@ -16,13 +16,10 @@ import type { Branch } from '@/types/branch';
 
 export default function BranchesPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const isUpdate = searchParams.get('update') === 'true';
-  const { merchant, deviceName: savedDeviceName, setBranch } = useAuthStore();
+  const { merchant, setBranch } = useAuthStore();
   const { showError } = useToastContext();
 
   const [selectedBranch, setSelectedBranch] = useState<Branch | null>(null);
-  const [deviceName, setDeviceName] = useState(savedDeviceName || '');
 
   const { data: branches, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['branches'],
@@ -31,10 +28,8 @@ export default function BranchesPage() {
 
   const handleContinue = () => {
     if (!selectedBranch) { showError(t('selectBranchError')); return; }
-    if (!deviceName.trim()) { showError(t('enterDeviceName')); return; }
-    setBranch(selectedBranch, deviceName.trim());
-    if (isUpdate) { router.back(); return; }
-    router.replace(merchant?.idSubscription === '2' ? '/casher' : '/dashboard');
+    setBranch(selectedBranch, selectedBranch.district || 'Device');
+    router.replace('/devices');
   };
 
   return (
@@ -50,16 +45,6 @@ export default function BranchesPage() {
           <p className="mt-2 text-sm text-white/50">{t('setupDeviceDesc')}</p>
         </div>
 
-        <div className="mb-6">
-          <label className="mb-1.5 block text-sm font-medium text-white/70">{t('deviceName')}</label>
-          <input
-            placeholder={t('deviceNamePlaceholder')}
-            value={deviceName}
-            onChange={(e) => setDeviceName(e.target.value)}
-            className="w-full h-12 rounded-xl border border-white/10 bg-white/5 px-4 text-base text-white placeholder:text-white/30 outline-none focus:border-brand-orange focus:ring-2 focus:ring-brand-orange/30 transition-all"
-          />
-        </div>
-
         {selectedBranch && (
           <div className="mb-6 rounded-xl border border-brand-orange/30 bg-brand-orange/10 p-4 animate-fade-in">
             <span className="text-xs font-medium text-brand-orange">{t('selectedBranch')}</span>
@@ -72,11 +57,9 @@ export default function BranchesPage() {
           <Button onClick={handleContinue} className="w-full" size="lg">
             {t('continue')}
           </Button>
-          {isUpdate && (
-            <button onClick={() => router.back()} className="mt-3 w-full text-center text-sm text-white/40 hover:text-white/60 transition-colors">
-              {t('cancel')}
-            </button>
-          )}
+          <button onClick={() => router.back()} className="mt-3 w-full text-center text-sm text-white/40 hover:text-white/60 transition-colors">
+            {t('cancel')}
+          </button>
         </div>
       </div>
 

@@ -3,10 +3,16 @@ import type { Merchant } from '@/types/merchant';
 import type { Branch } from '@/types/branch';
 import { STORAGE_KEYS } from '@/lib/constants';
 
+export interface PosDevice {
+  posName: string;
+  deviceId: string;
+}
+
 interface AuthState {
   token: string | null;
   merchant: Merchant | null;
   selectedBranch: Branch | null;
+  selectedDevice: PosDevice | 'all' | null;
   deviceName: string;
   isAuthenticated: boolean;
   isHydrated: boolean;
@@ -14,6 +20,7 @@ interface AuthState {
   setAuth: (token: string, merchant: Merchant) => void;
   setMerchant: (merchant: Merchant) => void;
   setBranch: (branch: Branch, deviceName: string) => void;
+  setDevice: (device: PosDevice | 'all') => void;
   logout: () => void;
   hydrate: () => void;
 }
@@ -22,6 +29,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   token: null,
   merchant: null,
   selectedBranch: null,
+  selectedDevice: null,
   deviceName: '',
   isAuthenticated: false,
   isHydrated: false,
@@ -42,15 +50,22 @@ export const useAuthStore = create<AuthState>((set) => ({
   setBranch: (branch, deviceName) => {
     localStorage.setItem(STORAGE_KEYS.BRANCH_SELECTED, JSON.stringify(branch));
     localStorage.setItem(STORAGE_KEYS.DEVICE_NAME, deviceName);
-    set({ selectedBranch: branch, deviceName });
+    set({ selectedBranch: branch, deviceName, selectedDevice: null });
+  },
+
+  setDevice: (device) => {
+    localStorage.setItem('selectedDevice', JSON.stringify(device));
+    set({ selectedDevice: device });
   },
 
   logout: () => {
     Object.values(STORAGE_KEYS).forEach((key) => localStorage.removeItem(key));
+    localStorage.removeItem('selectedDevice');
     set({
       token: null,
       merchant: null,
       selectedBranch: null,
+      selectedDevice: null,
       deviceName: '',
       isAuthenticated: false,
     });
@@ -61,23 +76,19 @@ export const useAuthStore = create<AuthState>((set) => ({
     const checkStatus = localStorage.getItem(STORAGE_KEYS.CHECK_STATUS);
     const merchantStr = localStorage.getItem(STORAGE_KEYS.ALL_USER_DATA);
     const branchStr = localStorage.getItem(STORAGE_KEYS.BRANCH_SELECTED);
+    const deviceStr = localStorage.getItem('selectedDevice');
     const deviceName = localStorage.getItem(STORAGE_KEYS.DEVICE_NAME) || '';
 
     let merchant: Merchant | null = null;
     let selectedBranch: Branch | null = null;
+    let selectedDevice: PosDevice | 'all' | null = null;
 
-    try {
-      if (merchantStr) merchant = JSON.parse(merchantStr);
-    } catch {}
-    try {
-      if (branchStr) selectedBranch = JSON.parse(branchStr);
-    } catch {}
+    try { if (merchantStr) merchant = JSON.parse(merchantStr); } catch {}
+    try { if (branchStr) selectedBranch = JSON.parse(branchStr); } catch {}
+    try { if (deviceStr) selectedDevice = JSON.parse(deviceStr); } catch {}
 
     set({
-      token,
-      merchant,
-      selectedBranch,
-      deviceName,
+      token, merchant, selectedBranch, selectedDevice, deviceName,
       isAuthenticated: !!token && checkStatus === 'true',
       isHydrated: true,
     });

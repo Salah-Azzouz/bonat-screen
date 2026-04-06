@@ -22,7 +22,7 @@ export default function SettingsPage() {
 
       <div className="flex-1 p-6">
         <div className="mx-auto max-w-lg space-y-2">
-          <button onClick={() => router.push('/branches?update=true')} className="flex w-full items-center gap-4 rounded-xl bg-surface px-5 py-4 text-start transition-colors hover:bg-surface/80 border border-border">
+          <button onClick={() => router.push('/branches')} className="flex w-full items-center gap-4 rounded-xl bg-surface px-5 py-4 text-start transition-colors hover:bg-surface/80 border border-border">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-bg text-text-muted">
               <SettingsIcon d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
             </div>

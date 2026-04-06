@@ -8,7 +8,7 @@ import { Spinner } from '@/components/ui/LoadingSpinner';
 
 export default function SplashPage() {
   const router = useRouter();
-  const { isAuthenticated, isHydrated, selectedBranch, setMerchant } = useAuthStore();
+  const { isAuthenticated, isHydrated, selectedBranch, selectedDevice, setMerchant } = useAuthStore();
 
   useEffect(() => {
     if (!isHydrated) return;
@@ -24,12 +24,17 @@ export default function SplashPage() {
         return;
       }
 
+      if (!selectedDevice) {
+        router.replace('/devices');
+        return;
+      }
+
       try {
         const merchant = await getMerchantProfile();
         setMerchant(merchant);
         router.replace(merchant.idSubscription === '2' ? '/casher' : '/dashboard');
       } catch {
-        router.replace('/login');
+        router.replace(selectedDevice ? '/casher' : '/devices');
       }
     };
 
